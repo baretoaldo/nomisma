@@ -2,7 +2,6 @@ import fs from "fs/promises";
 import axios from "axios";
 import { Wallet } from "ethers";
 
-// Colors for console output
 const colors = {
   reset: "\x1b[0m",
   green: "\x1b[32m",
@@ -12,324 +11,222 @@ const colors = {
 };
 
 const CONFIG = {
-  MIN_DELAY_BETWEEN_WALLETS: 5 * 1000,   // 5 seconds minimum
-  MAX_DELAY_BETWEEN_WALLETS: 10 * 1000,  // 10 seconds maximum
-  RESTART_DELAY: 5 * 60 * 60 * 1000,     // 5 hours
-  MAX_RETRIES: 3,                        // Maximum number of retries before removing wallet
+  BASE_URL: "https://prod.claimr.io",
+  CIVIC_URL: "https://apikeys.civiccomputing.com",
+  NOMISMA_URL: "https://nomisma-api-production.up.railway.app",
+  MIN_DELAY: 5 * 1000,
+  MAX_DELAY: 10 * 1000,
+  RESTART_DELAY: 5 * 60 * 60 * 1000,
+  MAX_RETRIES: 3,
+  CAMPAIGN_PARAMS: {
+    otag: "launchjoy",
+    ptag: "nomisma",
+    ref_id: "FjMCVEzG"
+  }
 };
 
-// Headers dasar yang akan digunakan
-const BASE_HEADERS = {
-  "accept": "application/json",
-  "content-type": "application/json",
-  "sec-ch-ua": '"Not A(Brand";v="8", "Chromium";v="132"',
-  "sec-ch-ua-mobile": "?1",
-  "sec-ch-ua-platform": '"Android"',
-  "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
-  "accept-encoding": "gzip, deflate, br",
-  "accept-language": "en-US,en;q=0.9,id-ID;q=0.8,id;q=0.7"
-};
+class ClaimrClient {
+  constructor(privateKey) {
+    this.wallet = new Wallet(privateKey);
+    this.sessionId = null;
+    this.accessToken = null;
+    this.civicKey = "74872c15308a8d1016ce517d69abf4005aba4d4d";
+  }
 
-// Fungsi helper
-const getRandomDelay = () => {
-  return Math.floor(
-    Math.random() * 
-    (CONFIG.MAX_DELAY_BETWEEN_WALLETS - CONFIG.MIN_DELAY_BETWEEN_WALLETS + 1) +
-    CONFIG.MIN_DELAY_BETWEEN_WALLETS
-  );
-};
+  async getCommonHeaders() {
+    return {
+      "sec-ch-ua": '"Not A(Brand";v="8", "Chromium";v="132"',
+      "user-agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36",
+      "sec-ch-ua-platform": '"Android"',
+      "origin": "https://widgets.claimr.io",
+      "referer": "https://widgets.claimr.io/",
+      "accept-encoding": "gzip, deflate, br"
+    };
+  }
+
+  async getAuthHeaders() {
+    return {
+      ...(await this.getCommonHeaders()),
+      "content-type": "application/json",
+      "authorization": this.accessToken ? `Bearer ${this.accessToken}` : "",
+      "session-id": this.sessionId
+    };
+  }
+
+  async getCookieConsent() {
+    const response = await axios.get(`${CONFIG.CIVIC_URL}/c/v`, {
+      params: {
+        d: "widgets.claimr.io",
+        p: "CookieControl Single-Site",
+        v: "9",
+        k: this.civicKey,
+        format: "json"
+      },
+      headers: await this.getCommonHeaders()
+    });
+    return response.data;
+  }
+
+  async createSession() {
+    const sessionId = `session_${Math.random().toString(36).substr(2, 9)}`;
+    const response = await axios.get(`${CONFIG.BASE_URL}/sessions`, {
+      params: { id: sessionId },
+      headers: await this.getCommonHeaders()
+    });
+    this.sessionId = sessionId;
+    return response.data;
+  }
+
+  async walletLogin() {
+    const message = `Please sign your public key in order to login into quest campaign`;
+    const signature = await this.wallet.signMessage(message);
+    
+    const payload = {
+      chain_id: "eip155",
+      network: "arbitrum",
+      address: this.wallet.address,
+      signature: signature,
+      message: message,
+      state: "MDo6cGJNb0YyNDFSYkNrc0VhZTo6b1VKXzhzZUI6OmZMRUZ6dzkwOjpjSXVFTGE1S2ZVam9jWEptOjpJbmRvbmVzaWE%3D"
+    };
+
+    const response = await axios.post(`${CONFIG.BASE_URL}/auth/wallet`, payload, {
+      headers: await this.getAuthHeaders()
+    });
+    
+    this.accessToken = response.data.data.access_token;
+    return response.data;
+  }
+
+  async getCampaignProgress() {
+    const response = await axios.get(`${CONFIG.BASE_URL}/v2/widget/campaign/progress`, {
+      params: {
+        ...CONFIG.CAMPAIGN_PARAMS,
+        session_id: this.sessionId
+      },
+      headers: await this.getAuthHeaders()
+    });
+    return response.data.data;
+  }
+
+  async dailyCheckin() {
+    const message = "Please sign to confirm daily check-in";
+    const signature = await this.wallet.signMessage(message);
+    
+    const payload = {
+      ...CONFIG.CAMPAIGN_PARAMS,
+      session_id: this.sessionId,
+      platform: "common",
+      signature: signature,
+      location: "Indonesia",
+      fid: "_Q]X=@9GbKh2L?Ji",
+      rate: 0
+    };
+
+    const response = await axios.post(`${CONFIG.BASE_URL}/v2/widget/campaign`, payload, {
+      headers: await this.getAuthHeaders()
+    });
+    
+    return response.data.data;
+  }
+
+  async executeFlow() {
+    try {
+      await this.getCookieConsent();
+      await this.createSession();
+      await this.walletLogin();
+      const progress = await this.getCampaignProgress();
+      await this.dailyCheckin();
+      return progress;
+    } catch (error) {
+      throw new Error(`API Error: ${error.response?.data?.message || error.message}`);
+    }
+  }
+}
 
 class WalletDashboard {
   constructor() {
     this.wallets = [];
-    this.walletStats = new Map();
     this.privateKeys = new Map();
-    this.currentWalletIndex = 0;
-    this.isRunning = true;
     this.errorCounts = new Map();
     this.removedWallets = [];
-    this.accessTokens = new Map(); // Menyimpan access token per wallet
-  }
-
-  async saveRemovedWallets() {
-    try {
-      const timestamp = new Date().toISOString().replace(/:/g, '-');
-      const content = this.removedWallets.map(wallet => 
-        `${wallet.address},${wallet.privateKey},${wallet.reason},${wallet.timestamp}`
-      ).join('\n');
-      
-      await fs.appendFile('removed_wallets.csv', content + '\n');
-      console.log(`${colors.yellow}Removed wallets saved to removed_wallets.csv${colors.reset}`);
-    } catch (error) {
-      console.error(`${colors.red}Error saving removed wallets: ${error.message}${colors.reset}`);
-    }
-  }
-
-  async removeWallet(wallet, reason) {
-    const privateKey = this.privateKeys.get(wallet);
-    this.wallets = this.wallets.filter(w => w !== wallet);
-    this.privateKeys.delete(wallet);
-    this.walletStats.delete(wallet);
-    this.errorCounts.delete(wallet);
-    this.accessTokens.delete(wallet);
-    
-    this.removedWallets.push({
-      address: wallet,
-      privateKey: privateKey,
-      reason: reason,
-      timestamp: new Date().toISOString()
-    });
-    
-    await this.saveRemovedWallets();
-    console.log(`${colors.red}Removed wallet ${wallet.substr(0, 6)}...${wallet.substr(-4)} due to: ${reason}${colors.reset}`);
-  }
-
-  increaseErrorCount(wallet) {
-    const currentCount = this.errorCounts.get(wallet) || 0;
-    this.errorCounts.set(wallet, currentCount + 1);
-    return currentCount + 1;
   }
 
   async initialize() {
-    try {
-      const data = await fs.readFile("data.txt", "utf8");
-      const privateKeys = data.split("\n").filter((line) => line.trim() !== "");
-
-      for (let privateKey of privateKeys) {
-        try {
-          // Tambahkan "0x" jika tidak ada untuk ethers.js
-          let formattedKey = privateKey;
-          if (!privateKey.startsWith("0x")) {
-            formattedKey = "0x" + privateKey;
-          }
-
-          // Validasi panjang dan format
-          if (!/^(0x)?[0-9a-fA-F]{64}$/.test(formattedKey)) {
-            throw new Error("Invalid private key format or length");
-          }
-
-          const wallet = new Wallet(formattedKey);
-          const address = wallet.address;
-          this.wallets.push(address);
-          // Simpan private key asli (tanpa modifikasi)
-          this.privateKeys.set(address, privateKey);
-          this.walletStats.set(address, {
-            status: "Pending",
-            lastPing: "-",
-            points: 0,
-            error: null,
-          });
-        } catch (error) {
-          console.error(`${colors.red}Invalid private key: ${privateKey} - ${error.message}${colors.reset}`);
-        }
-      }
-
-      if (this.wallets.length === 0) {
-        throw new Error("No valid private keys found in data.txt");
-      }
-      
-      console.log(`${colors.cyan}Successfully loaded ${colors.yellow}${this.wallets.length}${colors.cyan} wallets${colors.reset}`);
-    } catch (error) {
-      console.error(`${colors.red}Error reading data.txt: ${error}${colors.reset}`);
-      process.exit(1);
-    }
-  }
-
-  async authenticateWallet(wallet, privateKey) {
-    try {
-      // Gunakan private key asli dari Map
-      const originalKey = this.privateKeys.get(wallet);
-      const walletInstance = new Wallet(originalKey);
-      const message = `Please sign your public key '${walletInstance.publicKey}' in order to login into quest campaign`;
-      const signature = await walletInstance.signMessage(message);
-
-      const authPayload = {
-        chain_id: "eip155",
-        network: "eth_mainnet",
-        address: wallet,
-        signature: signature,
-        message: message,
-        state: "MDo6cGJNb0YyNDFSYkNrc0VhZTo6b1VKXzhzZUI6OmZMRUZ6dzkwOjpjSXVFTGE1S2ZVam9jWEptOjpJbmRvbmVzaWE%3D"
-      };
-
-      const response = await axios.post(
-        "https://prod.claimr.io/auth/wallet",
-        authPayload,
-        {
-          headers: {
-            ...BASE_HEADERS,
-            "origin": "https://widgets.claimr.io",
-            "referer": "https://widgets.claimr.io/"
-          }
-        }
-      );
-
-      if (response.data.success) {
-        this.accessTokens.set(wallet, response.data.data.access_token);
-        return true;
-      }
-      return false;
-    } catch (error) {
-      throw new Error(`Authentication failed: ${error.message}`);
-    }
-  }
-
-  async checkNodeStatus(wallet) {
-    try {
-      const sessionId = "cIuELa5KfUjocXJm";
-      const response = await axios.get(
-        `https://prod.claimr.io/sessions?id=${sessionId}`,
-        {
-          headers: {
-            ...BASE_HEADERS,
-            "origin": "https://widgets.claimr.io",
-            "referer": "https://widgets.claimr.io/"
-          }
-        }
-      );
-      return response.data.success;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  async updatePoints(wallet) {
-    try {
-      const token = this.accessTokens.get(wallet);
-      if (!token) {
-        throw new Error("No access token found");
-      }
-
-      const response = await axios.get(
-        "https://prod.claimr.io/v2/widget/campaign/progress?otag=launchjoy&ptag=nomisma&session_id=cIuELa5KfUjocXJm&ref_id=FjMCVEzG&",
-        {
-          headers: {
-            ...BASE_HEADERS,
-            "Authorization": `Bearer ${token}`,
-            "origin": "https://widgets.claimr.io",
-            "referer": "https://widgets.claimr.io/"
-          }
-        }
-      );
-
-      if (response.data.success) {
-        return {
-          nodePoints: response.data.data.progress.pcn,
-          xp: response.data.data.progress.xp
-        };
-      }
-      return { nodePoints: 0 };
-    } catch (error) {
-      throw new Error(`Failed to update points: ${error.message}`);
-    }
-  }
-
-  async signAndStart(wallet, privateKey) {
-    try {
-      const authSuccess = await this.authenticateWallet(wallet, privateKey);
-      return authSuccess;
-    } catch (error) {
-      throw new Error(`Sign and start failed: ${error.message}`);
-    }
-  }
-
-  async processWallet(wallet) {
-    const stats = this.walletStats.get(wallet);
-    const walletNum = this.currentWalletIndex + 1;
-    const totalWallets = this.wallets.length;
+    const data = await fs.readFile("data.txt", "utf8");
+    const privateKeys = data.split("\n").filter(line => line.trim());
     
-    console.log(`\n${colors.cyan}--- Processing wallet ${colors.yellow}${walletNum}/${totalWallets}${colors.cyan}: ${wallet.substr(0, 6)}...${wallet.substr(-4)} ---${colors.reset}`);
-    stats.status = "Processing";
+    this.wallets = privateKeys.map(pk => {
+      const wallet = new Wallet(pk);
+      this.privateKeys.set(wallet.address, pk);
+      return wallet.address;
+    });
 
+    console.log(`${colors.cyan}Loaded ${this.wallets.length} wallets${colors.reset}`);
+  }
+
+  async processWallet(walletAddress) {
+    const privateKey = this.privateKeys.get(walletAddress);
+    const client = new ClaimrClient(privateKey);
+    
     try {
-      const privateKey = this.privateKeys.get(wallet);
-      if (!privateKey) {
-        throw new Error("Private key not found for wallet");
-      }
-
-      console.log(`${colors.cyan}Checking status for wallet ${colors.yellow}${walletNum}/${totalWallets}${colors.reset}`);
-      stats.status = "Checking Status";
-      
-      const isRunning = await this.checkNodeStatus(wallet);
-      
-      if (!isRunning || !this.accessTokens.get(wallet)) {
-        console.log(`${colors.yellow}Activating wallet ${walletNum}/${totalWallets}${colors.reset}`);
-        stats.status = "Activating";
-        
-        const activated = await this.signAndStart(wallet, privateKey);
-        if (!activated) {
-          throw new Error("Node activation unsuccessful");
-        }
-        
-        console.log(`${colors.green}Successfully activated wallet ${walletNum}/${totalWallets}${colors.reset}`);
-        stats.status = "Activated";
-        
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      } else {
-        console.log(`${colors.green}Wallet ${walletNum}/${totalWallets} is already active${colors.reset}`);
-      }
-
-      console.log(`${colors.cyan}Pinging wallet ${colors.yellow}${walletNum}/${totalWallets}${colors.reset}`);
-      const result = await this.updatePoints(wallet);
-      stats.lastPing = new Date().toLocaleTimeString();
-      stats.points = result.nodePoints || stats.points;
-      stats.status = "Active";
-      stats.error = null;
-      this.errorCounts.set(wallet, 0);
-      
-      console.log(`${colors.green}Ping successful for wallet ${walletNum}/${totalWallets}. Current points: ${colors.green}${stats.points}${colors.reset}`);
-      
+      const result = await client.executeFlow();
+      const points = result.progress.pcn;
+      console.log(`${colors.green}Success for ${walletAddress} | Points: ${points}${colors.reset}`);
       return true;
     } catch (error) {
-      stats.status = "Error";
-      stats.error = error.message;
-      console.error(`${colors.red}Error processing wallet ${walletNum}/${totalWallets}: ${error.message}${colors.reset}`);
-      
-      const errorCount = this.increaseErrorCount(wallet);
-      if (errorCount >= CONFIG.MAX_RETRIES) {
-        await this.removeWallet(wallet, error.message);
-        return false;
-      }
-      
+      console.error(`${colors.red}Error for ${walletAddress}: ${error.message}${colors.reset}`);
       return false;
     }
   }
 
   async processAllWallets() {
-    while (this.isRunning) {
-      for (this.currentWalletIndex = 0; this.currentWalletIndex < this.wallets.length; this.currentWalletIndex++) {
-        const wallet = this.wallets[this.currentWalletIndex];
-        await this.processWallet(wallet);
+    while (this.wallets.length > 0) {
+      for (const [index, wallet] of this.wallets.entries()) {
+        const success = await this.processWallet(wallet);
         
-        if (this.currentWalletIndex < this.wallets.length - 1) {
-          const delay = getRandomDelay();
-          const delaySeconds = (delay / 1000).toFixed(1);
-          console.log(`${colors.cyan}Waiting ${colors.yellow}${delaySeconds}${colors.cyan} seconds before processing next wallet...${colors.reset}`);
+        if (!success) {
+          const errorCount = this.errorCounts.get(wallet) || 0;
+          if (errorCount >= CONFIG.MAX_RETRIES) {
+            await this.removeWallet(wallet);
+          } else {
+            this.errorCounts.set(wallet, errorCount + 1);
+          }
+        }
+        
+        if (index < this.wallets.length - 1) {
+          const delay = Math.floor(Math.random() * 
+            (CONFIG.MAX_DELAY - CONFIG.MIN_DELAY)) + CONFIG.MIN_DELAY;
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
       
-      if (this.wallets.length === 0) {
-        console.log(`${colors.red}No wallets remaining. Stopping process.${colors.reset}`);
-        this.isRunning = false;
-        break;
-      }
-      
-      console.log(`\n${colors.green}Completed processing all ${colors.yellow}${this.wallets.length}${colors.green} wallets.${colors.reset}`);
-      console.log(`${colors.cyan}Waiting ${colors.yellow}${CONFIG.RESTART_DELAY / 3600000}${colors.cyan} hours before restarting the process...${colors.reset}`);
+      console.log(`${colors.cyan}Cycle completed. Restarting in ${CONFIG.RESTART_DELAY/3600000} hours...${colors.reset}`);
       await new Promise(resolve => setTimeout(resolve, CONFIG.RESTART_DELAY));
-      console.log(`${colors.green}Restarting wallet processing cycle...${colors.reset}`);
     }
   }
 
-  async start() {
-    await this.initialize();
-    await this.processAllWallets();
+  async removeWallet(wallet) {
+    this.wallets = this.wallets.filter(w => w !== wallet);
+    this.privateKeys.delete(wallet);
+    this.errorCounts.delete(wallet);
+    this.removedWallets.push(wallet);
+    await this.saveRemovedWallets();
+  }
+
+  async saveRemovedWallets() {
+    const content = this.removedWallets.join('\n');
+    await fs.appendFile('removed_wallets.txt', content + '\n');
   }
 }
 
-const dashboard = new WalletDashboard();
-dashboard.start().catch((error) => {
-  console.error(`${colors.red}Fatal error: ${error}${colors.reset}`);
-  process.exit(1);
-});
+(async () => {
+  try {
+    const dashboard = new WalletDashboard();
+    await dashboard.initialize();
+    await dashboard.processAllWallets();
+  } catch (error) {
+    console.error(`${colors.red}Fatal error: ${error}${colors.reset}`);
+    process.exit(1);
+  }
+})();
